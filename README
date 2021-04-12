@@ -1,0 +1,55 @@
+This is Wwise_SDL, an SDL output plugin for the GNU/Linux version of Wwise.
+
+Project Website: https://github.com/flibitijibibo/Wwise_SDL/
+
+License
+-------
+Wwise_SDL is released under a dual license for Wwise licensees. See the top of
+the Wwise_SDL.cpp file for details.
+
+About Wwise_SDL
+---------------
+When Wwise was originally brought to Linux, it used SDL for audio output. The
+port was originally done by Ryan C. Gordon as part of the Limbo port, also
+developed by Ryan and produced by Edward Rudd.
+
+However, starting with versions 2019 and newer, the audio backend is now a set
+of plugins for PulseAudio and ALSA. This made the three of us groan, so I opted
+to write my own plugin like I did with FMOD. AudioKinetic even got in touch and
+sent me the old SDL sink, which this project is based on! That was nice of them!
+
+Big problem though: Plugins aren't like FMOD where you can just programmatically
+set a new output device arbitrarily, you have to load the plugin in the Wwise
+authoring tools and assign it to be baked as part of the content files. I'm just
+a porter, I don't want to touch those files and/or bother the original dev!
+
+Enter the GNU linker. After fussing with the object code in the Wwise SDK I
+discovered that there's a symbol called "AkCreateDefaultSink" that is used
+internally to generate the OS sink built into the middleware. This is usually
+where people think "oh, you just LD_PRELOADed it didn't you," to which I say: I
+didn't have to! There's a lovely behavior in the linker where if you define a
+symbol twice, it picks the first one it finds and discards the later ones
+completely! So when building the Wwise binary for Streets of Rage 4 (oh, by the
+way, this was for Streets of Rage 4's native Linux version, available now!!!),
+all I have to do is make sure Wwise_SDL is first in the build line and it will
+magically pick my version instead of AudioKinetic's, allowing me to load any
+IAkSinkPlugin implementation I want. Go Freedom(TM).
+
+How to Build
+------------
+When building your Linux binary, simply add Wwise_SDL to the front of the line,
+ensuring that our AkCreateDefaultSink gets priority over the one in
+AkSoundEngine.a. It's intentionally written as a single file rather than a
+proper Wwise plugin file structure to make life easier for programmers.
+
+What about a real plugin?
+-------------------------
+While this is just about the furthest thing from an official solution, I do
+think it's the best way to do this. If you _really_ want the "real" plugin,
+feel free to get in touch, as a proper plugin does technically exist!
+
+Found an issue?
+---------------
+Issues and patches can be reported via GitHub:
+
+https://github.com/flibitijibibo/Wwise_SDL/issues
