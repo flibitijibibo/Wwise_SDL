@@ -200,20 +200,19 @@ AKRESULT SDL2OutputSink::Init(
 		{
 			channels = 0;
 		}
-#if SDL_VERSION_ATLEAST(2, 0, 15)
 		if (channels <= 0)
 		{
 			int devcount = SDL_GetNumAudioDevices(0);
 			for (int i = 0; i < devcount; i += 1)
 			{
 				SDL_GetAudioDeviceSpec(i, 0, &spec);
-				if (spec.channels > channels)
+				if (	(spec.channels > channels) &&
+					(spec.channels <= 8)	)
 				{
 					channels = spec.channels;
 				}
 			}
 		}
-#endif /* SDL >= 2.0.15 */
 		if (channels <= 0)
 		{
 			channels = 2;
