@@ -46,14 +46,14 @@ static inline int32_t AkAtomicSub32(AkAtomic32 *pDest, int32_t value)
 }
 #endif /* > 2019.1 */
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 
-class SDL2OutputSink
+class SDL3OutputSink
 	: public AK::IAkSinkPlugin
 {
 public:
-	SDL2OutputSink();
-	~SDL2OutputSink();
+	SDL3OutputSink();
+	~SDL3OutputSink();
 
 	AKRESULT Init(
 		AK::IAkPluginMemAlloc *in_pAllocator,
@@ -87,7 +87,7 @@ private:
 	bool m_bDataReady = false;
 
 	bool m_bRun = false;
-	AkUInt32 m_uDeviceId = 0;
+	SDL_AudioStream *m_pDeviceId = nullptr;
 
 	AkChannelConfig m_SpeakersConfig;
 	AkUInt32 m_ReadHead = 0;
@@ -95,26 +95,58 @@ private:
 	AkInt32 m_WriteHead = 0;
 	AkAtomic32 m_SamplesReady = 0;
 	void* m_pData = nullptr;
+
+	static void SDLCALL SDLAudioCallback(
+		void *userdata,
+		SDL_AudioStream *stream,
+		int additional_amount,
+		int total_amount
+	);
 };
 
-static void SDLCALL SDLAudioCallback(void* userdata, Uint8 *stream, int len)
-{
-	((SDL2OutputSink*) userdata)->AudioCallback(
-		(float*) stream,
-		len / sizeof(float)
+void SDLCALL SDL3OutputSink::SDLAudioCallback(
+	void *userdata,
+	SDL_AudioStream *stream,
+	int additional_amount,
+	int total_amount
+) {
+	SDL3OutputSink *pThis = (SDL3OutputSink*) userdata;
+
+	int additional_samples = (
+		additional_amount /
+		sizeof(float) /
+		pThis->m_SpeakersConfig.uNumChannels
 	);
+	while (additional_samples > 0)
+	{
+		int samples = SDL_min(
+			additional_samples,
+			pThis->m_pContext->GlobalContext()->GetMaxBufferLength()
+		);
+		float staging[samples * pThis->m_SpeakersConfig.uNumChannels];
+
+		pThis->AudioCallback(staging, samples * pThis->m_SpeakersConfig.uNumChannels);
+
+		SDL_PutAudioStreamData(
+			stream,
+			staging,
+			sizeof(staging)
+		);
+
+		additional_samples -= samples;
+	}
 }
 
-SDL2OutputSink::SDL2OutputSink()
+SDL3OutputSink::SDL3OutputSink()
 {
 }
 
-SDL2OutputSink::~SDL2OutputSink()
+SDL3OutputSink::~SDL3OutputSink()
 {
 	DestroyBuffer();
 }
 
-AKRESULT SDL2OutputSink::Init(
+AKRESULT SDL3OutputSink::Init(
 	AK::IAkPluginMemAlloc *in_pAllocator,
 	AK::IAkSinkPluginContext *in_pCtx,
 	AK::IAkPluginParam *in_pParams,
@@ -137,58 +169,10 @@ AKRESULT SDL2OutputSink::Init(
 	SDL_zero(desired);
 
 	desired.freq = m_pContext->GlobalContext()->GetSampleRate();
-	desired.format = AUDIO_F32SYS;
-	desired.samples = m_pContext->GlobalContext()->GetMaxBufferLength();
-	desired.callback = SDLAudioCallback;
-	desired.userdata = this;
+	desired.format = SDL_AUDIO_F32;
 
 	if (!m_SpeakersConfig.IsValid())
 	{
-		/* Okay, so go grab something from the liquor cabinet and get
-		 * ready, because this loop is a bit of a trip:
-		 *
-		 * We can't get the spec for the default device, because in
-		 * audio land a "default device" is a completely foreign idea,
-		 * some APIs support it but in reality you just have to pass
-		 * NULL as a driver string and the sound server figures out the
-		 * rest. In some psychotic universe the device can even be a
-		 * network address. No, seriously.
-		 *
-		 * So what do we do? Well, at least in my experience shipping
-		 * for the PC, the easiest thing to do is assume that the
-		 * highest spec in the list is what you should target, even if
-		 * it turns out that's not the default at the time you create
-		 * your device.
-		 *
-		 * Consider a laptop that has built-in stereo speakers, but is
-		 * connected to a home theater system with 5.1 audio. It may be
-		 * the case that the stereo audio is active, but the user may
-		 * at some point move audio to 5.1, at which point the server
-		 * will simply move the endpoint from underneath us and move our
-		 * output stream to the new device. At that point, you _really_
-		 * want to already be pushing out 5.1, because if not the user
-		 * will be stuck recreating the whole program, which on many
-		 * platforms is an instant cert failure. The tradeoff is that
-		 * you're potentially downmixing a 5.1 stream to stereo, which
-		 * is a bit wasteful, but presumably the hardware can handle it
-		 * if they were able to use a 5.1 system to begin with.
-		 *
-		 * So, we just aim for the highest channel count on the system.
-		 * We also do this with sample rate to a lesser degree; we try
-		 * to use a single device spec at a time, so it may be that
-		 * the sample rate you get isn't the highest from the list if
-		 * another device had a higher channel count.
-		 *
-		 * Lastly, if you set SDL_AUDIO_CHANNELS but not
-		 * SDL_AUDIO_FREQUENCY, we don't bother checking for a sample
-		 * rate, we fall through to the hardcoded value at the bottom of
-		 * this function.
-		 *
-		 * I'm so tired.
-		 *
-		 * -flibit
-		 */
-		SDL_AudioSpec spec;
 		int channels;
 		const char *envvar;
 		envvar = SDL_getenv("SDL_AUDIO_CHANNELS");
@@ -198,21 +182,11 @@ AKRESULT SDL2OutputSink::Init(
 		}
 		else
 		{
-			channels = 0;
+			SDL_AudioSpec spec;
+			SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL);
+			channels = spec.channels;
 		}
-		if (channels <= 0)
-		{
-			int devcount = SDL_GetNumAudioDevices(0);
-			for (int i = 0; i < devcount; i += 1)
-			{
-				SDL_GetAudioDeviceSpec(i, 0, &spec);
-				if (	(spec.channels > channels) &&
-					(spec.channels <= 8)	)
-				{
-					channels = spec.channels;
-				}
-			}
-		}
+
 		if (channels <= 0)
 		{
 			channels = 2;
@@ -233,16 +207,21 @@ AKRESULT SDL2OutputSink::Init(
 			m_SpeakersConfig.SetStandard(AK_SPEAKER_SETUP_STEREO);
 			break;
 		default:
-			SDL_Log("CAkSinkSDL2::Init(): Unknown channel configuration: %d\n", channels);
+			SDL_Log("CAkSinkSDL3::Init(): Unknown channel configuration: %d\n", channels);
 			return AK_Fail;
 		}
 	}
 
 	desired.channels = m_SpeakersConfig.uNumChannels;
-	m_uDeviceId = SDL_OpenAudioDevice(NULL, 0, &desired, NULL, 0);
-	if (m_uDeviceId == 0)
+	m_pDeviceId = SDL_OpenAudioDeviceStream(
+		SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
+		&desired,
+		SDLAudioCallback,
+		this
+	);
+	if (m_pDeviceId == nullptr)
 	{
-		SDL_Log("CAkSinkSDL2::Init(): %s\n", SDL_GetError());
+		SDL_Log("CAkSinkSDL3::Init(): %s\n", SDL_GetError());
 		return AK_Fail;
 	}
 
@@ -257,29 +236,29 @@ AKRESULT SDL2OutputSink::Init(
 	return AK_Success;
 }
 
-AKRESULT SDL2OutputSink::Term(AK::IAkPluginMemAlloc *in_pAllocator)
+AKRESULT SDL3OutputSink::Term(AK::IAkPluginMemAlloc *in_pAllocator)
 {
 	m_bRun = false;
 
-	if (m_uDeviceId)
+	if (m_pDeviceId != nullptr)
 	{
-		SDL_PauseAudioDevice(m_uDeviceId, 1);
-		SDL_CloseAudioDevice(m_uDeviceId);
-		m_uDeviceId = 0;
+		SDL_PauseAudioStreamDevice(m_pDeviceId);
+		SDL_DestroyAudioStream(m_pDeviceId);
+		m_pDeviceId = NULL;
 	}
 
 	AK_PLUGIN_DELETE(in_pAllocator, this);
 	return AK_Success;
 }
 
-AKRESULT SDL2OutputSink::Reset()
+AKRESULT SDL3OutputSink::Reset()
 {
 	m_bRun = true;
-	SDL_PauseAudioDevice(m_uDeviceId, 0);
+	SDL_ResumeAudioStreamDevice(m_pDeviceId);
 	return AK_Success;
 }
 
-AKRESULT SDL2OutputSink::GetPluginInfo(AkPluginInfo& out_rPluginInfo)
+AKRESULT SDL3OutputSink::GetPluginInfo(AkPluginInfo& out_rPluginInfo)
 {
 	out_rPluginInfo.eType = AkPluginTypeSink;
 	out_rPluginInfo.bIsInPlace = true;
@@ -287,7 +266,7 @@ AKRESULT SDL2OutputSink::GetPluginInfo(AkPluginInfo& out_rPluginInfo)
 	return AK_Success;
 }
 
-AKRESULT SDL2OutputSink::IsDataNeeded(AkUInt32& out_uNumFramesNeeded)
+AKRESULT SDL3OutputSink::IsDataNeeded(AkUInt32& out_uNumFramesNeeded)
 {
 	AkUInt32 samplesReady = AkAtomicLoad32(&m_SamplesReady);
 	AkUInt32 uNumFrames = m_pContext->GlobalContext()->GetMaxBufferLength();
@@ -296,7 +275,7 @@ AKRESULT SDL2OutputSink::IsDataNeeded(AkUInt32& out_uNumFramesNeeded)
 	return AK_Success;
 }
 
-void SDL2OutputSink::Consume(AkAudioBuffer *in_pInputBuffer, AkRamp in_gain)
+void SDL3OutputSink::Consume(AkAudioBuffer *in_pInputBuffer, AkRamp in_gain)
 {
 	if (in_pInputBuffer->uValidFrames > 0)
 	{
@@ -329,7 +308,7 @@ void SDL2OutputSink::Consume(AkAudioBuffer *in_pInputBuffer, AkRamp in_gain)
 	}
 }
 
-void SDL2OutputSink::OnFrameEnd()
+void SDL3OutputSink::OnFrameEnd()
 {
 	if (!m_bDataReady)
 	{
@@ -349,17 +328,17 @@ void SDL2OutputSink::OnFrameEnd()
 	m_bDataReady = false;
 }
 
-bool SDL2OutputSink::IsStarved()
+bool SDL3OutputSink::IsStarved()
 {
 	return m_bStarved;
 }
 
-void SDL2OutputSink::ResetStarved()
+void SDL3OutputSink::ResetStarved()
 {
 	m_bStarved = false;
 }
 
-AKRESULT SDL2OutputSink::AllocBuffer(AkUInt32 in_size)
+AKRESULT SDL3OutputSink::AllocBuffer(AkUInt32 in_size)
 {
 	DestroyBuffer();
 
@@ -385,7 +364,7 @@ AKRESULT SDL2OutputSink::AllocBuffer(AkUInt32 in_size)
 	}
 }
 
-void SDL2OutputSink::DestroyBuffer()
+void SDL3OutputSink::DestroyBuffer()
 {
 	if (m_pData)
 	{
@@ -397,7 +376,7 @@ void SDL2OutputSink::DestroyBuffer()
 	m_WriteHead = m_ReadHead = m_SamplesReady = 0;
 }
 
-void SDL2OutputSink::AudioCallback(float *stream, int numsamples)
+void SDL3OutputSink::AudioCallback(float *stream, int numsamples)
 {
 	if (m_bRun)
 	{
@@ -436,19 +415,19 @@ void SDL2OutputSink::AudioCallback(float *stream, int numsamples)
 
 AK::IAkPlugin* AkCreateDefaultSink(AK::IAkPluginMemAlloc* in_pAllocator)
 {
-	return AK_PLUGIN_NEW(in_pAllocator, SDL2OutputSink());
+	return AK_PLUGIN_NEW(in_pAllocator, SDL3OutputSink());
 }
 
 #else
 
 /* There's supposed to be a whole struct here, but this is for authoring only */
 
-struct SDL2OutputSinkParams
+struct SDL3OutputSinkParams
 	: public AK::IAkPluginParam
 {
-	SDL2OutputSinkParams() { }
-	SDL2OutputSinkParams(const SDL2OutputSinkParams& in_rParams) { }
-	~SDL2OutputSinkParams() { }
+	SDL3OutputSinkParams() { }
+	SDL3OutputSinkParams(const SDL3OutputSinkParams& in_rParams) { }
+	~SDL3OutputSinkParams() { }
 	IAkPluginParam* Clone(AK::IAkPluginMemAlloc* in_pAllocator) override { }
 	AKRESULT Init(
 		AK::IAkPluginMemAlloc* in_pAllocator,
@@ -478,23 +457,23 @@ struct SDL2OutputSinkParams
 
 /* This is what we _should_ be doing, but alas... */
 
-AK::IAkPlugin* CreateSDL2OutputSink(AK::IAkPluginMemAlloc* in_pAllocator)
+AK::IAkPlugin* CreateSDL3OutputSink(AK::IAkPluginMemAlloc* in_pAllocator)
 {
-	return AK_PLUGIN_NEW(in_pAllocator, SDL2OutputSink());
+	return AK_PLUGIN_NEW(in_pAllocator, SDL3OutputSink());
 }
 
-AK::IAkPluginParam* CreateSDL2OutputSinkParams(AK::IAkPluginMemAlloc* in_pAllocator)
+AK::IAkPluginParam* CreateSDL3OutputSinkParams(AK::IAkPluginMemAlloc* in_pAllocator)
 {
-	return AK_PLUGIN_NEW(in_pAllocator, SDL2OutputSinkParams());
+	return AK_PLUGIN_NEW(in_pAllocator, SDL3OutputSinkParams());
 }
 
 AK_IMPLEMENT_PLUGIN_FACTORY(
-	SDL2OutputSink,
+	SDL3OutputSink,
 	AkPluginTypeSink,
-	SDL2OutputConfig::CompanyID,
-	SDL2OutputConfig::PluginID
+	SDL3OutputConfig::CompanyID,
+	SDL3OutputConfig::PluginID
 )
 
-AK_STATIC_LINK_PLUGIN(SDL2OutputSink)
+AK_STATIC_LINK_PLUGIN(SDL3OutputSink)
 
 #endif /* DISABLE_EXTREMELY_GOOD_LINKER_HACK */
